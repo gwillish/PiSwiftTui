@@ -24,7 +24,8 @@ final class ToolTestTerminal: Terminal {
 }
 
 func toolTestPlain(_ text: String) -> String {
-    text.replacingOccurrences(of: "\u{001B}\\][^\u{0007}]*\u{0007}", with: "", options: .regularExpression)
+    // Upstream v1.2.0 fake cursor markers are APC sequences (`ESC _ ... BEL`), as OSC sequences are stripped here.
+    text.replacingOccurrences(of: "\u{001B}[\\]_][^\u{0007}]*\u{0007}", with: "", options: .regularExpression)
         .replacingOccurrences(of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
 }
 
