@@ -80,11 +80,14 @@ private func parseCLI(_ args: [String]) throws -> Args {
         process.arguments = arguments
         let stderr = Pipe()
         process.standardError = stderr
-        process.standardOutput = Pipe()
+        let stdout = Pipe()
+        process.standardOutput = stdout
         try process.run()
+        let outputReader = TestPipeReader(stdout)
+        let message = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        _ = outputReader.wait()
         process.waitUntilExit()
         #expect(process.terminationStatus != 0)
-        let message = String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         #expect(message.contains(expected))
     }
 }

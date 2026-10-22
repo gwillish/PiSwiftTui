@@ -33,6 +33,8 @@ private func runMcpExecutable(_ arguments: [String], root: URL) throws -> McpExe
     process.standardOutput = output
     process.standardError = error
     try process.run()
+    let outputReader = TestPipeReader(output)
+    let errorReader = TestPipeReader(error)
     let deadline = Date().addingTimeInterval(10)
     while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
     if process.isRunning {
@@ -40,10 +42,12 @@ private func runMcpExecutable(_ arguments: [String], root: URL) throws -> McpExe
         process.waitUntilExit()
         throw McpExecutableTestError.timeout
     }
+    let outputData = outputReader.wait()
+    let errorData = errorReader.wait()
     process.waitUntilExit()
     return McpExecutableResult(code: process.terminationStatus,
-        output: String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-        error: String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        output: String(decoding: outputData, as: UTF8.self),
+        error: String(decoding: errorData, as: UTF8.self))
 }
 
 private func mcpExecutableDirectory() throws -> URL {

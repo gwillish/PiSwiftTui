@@ -31,6 +31,8 @@ private func runCLIParityV100(_ arguments: [String], root: URL) throws -> (code:
     process.standardOutput = output
     process.standardError = error
     try process.run()
+    let outputReader = TestPipeReader(output)
+    let errorReader = TestPipeReader(error)
     let deadline = Date().addingTimeInterval(15)
     while process.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
     if process.isRunning {
@@ -38,10 +40,12 @@ private func runCLIParityV100(_ arguments: [String], root: URL) throws -> (code:
         process.waitUntilExit()
         throw CLIParityV100Error.timeout
     }
+    let outputData = outputReader.wait()
+    let errorData = errorReader.wait()
     process.waitUntilExit()
     return (process.terminationStatus,
-        String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-        String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        String(decoding: outputData, as: UTF8.self),
+        String(decoding: errorData, as: UTF8.self))
 }
 
 private func cliParityV100Root() throws -> URL {

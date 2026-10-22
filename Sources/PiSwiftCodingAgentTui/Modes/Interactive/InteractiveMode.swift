@@ -851,14 +851,14 @@ public final class InteractiveMode {
         do {
             try process.run()
             // Simple timeout: if process doesn't exit in 2 seconds, terminate
-            let task = Task {
+            let task = Task.detached {
                 try await Task.sleep(nanoseconds: 2_000_000_000)
                 if process.isRunning { process.terminate() }
             }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             process.waitUntilExit()
             task.cancel()
             guard process.terminationStatus == 0 else { return nil }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
             return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch { return nil }
     }

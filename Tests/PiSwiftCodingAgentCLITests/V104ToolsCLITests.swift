@@ -194,8 +194,8 @@ struct V104ToolsCLITests {
         process.standardOutput = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
         try process.run()
+        #expect(String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).isEmpty)
         process.waitUntilExit()
         #expect(process.terminationStatus == 0)
-        #expect(String(decoding: error.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).isEmpty)
     }
 }

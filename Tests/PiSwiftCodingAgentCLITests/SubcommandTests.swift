@@ -355,12 +355,16 @@ private func runTestCLI(
     process.standardOutput = stdout
     process.standardError = stderr
     try process.run()
+    let outputReader = TestPipeReader(stdout)
+    let errorReader = TestPipeReader(stderr)
+    let outputData = outputReader.wait()
+    let errorData = errorReader.wait()
     process.waitUntilExit()
 
     return TestCLIResult(
         status: process.terminationStatus,
-        stdout: String(decoding: stdout.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self),
-        stderr: String(decoding: stderr.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        stdout: String(decoding: outputData, as: UTF8.self),
+        stderr: String(decoding: errorData, as: UTF8.self)
     )
 }
 

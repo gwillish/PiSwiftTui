@@ -37,15 +37,6 @@ private func resolveStdoutCleanlinessCliPath() -> String {
     return candidates.first { fileManager.isExecutableFile(atPath: $0) } ?? candidates[0]
 }
 
-private func readPipe(_ pipe: Pipe) async -> String {
-    await withCheckedContinuation { continuation in
-        DispatchQueue.global().async {
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            continuation.resume(returning: String(data: data, encoding: .utf8) ?? "")
-        }
-    }
-}
-
 private func writeTestAuth(agentDir: String, provider: String = "anthropic") throws {
     let authPath = URL(fileURLWithPath: agentDir).appendingPathComponent("auth.json")
     let json = #"{"\#(provider)":{"type":"api_key","key":"test-key"}}"#
@@ -179,13 +170,14 @@ private func runCLI(
 
     try process.run()
     stdinPipe.fileHandleForWriting.closeFile()
+    let outputReader = TestPipeReader(stdoutPipe)
+    let errorReader = TestPipeReader(stderrPipe)
+    let stdout = outputReader.wait()
+    let stderr = errorReader.wait()
     process.waitUntilExit()
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
-
-    async let stdout = readPipe(stdoutPipe)
-    async let stderr = readPipe(stderrPipe)
-    return (process.terminationStatus, await stdout, await stderr)
+    return (process.terminationStatus,
+        String(data: stdout, encoding: .utf8) ?? "",
+        String(data: stderr, encoding: .utf8) ?? "")
 }
 
 @Test func printModeRedirectsStartupStdoutNoiseToStderr() async throws {
@@ -250,16 +242,16 @@ private func runCLI(
     process.standardError = stderrPipe
 
     try process.run()
+    let errorReader = TestPipeReader(stderrPipe)
 
     let payload = #"{"type":"get_state","id":"state_1"}"# + "\n"
     try stdinPipe.fileHandleForWriting.write(contentsOf: Data(payload.utf8))
     let line = try readFirstLine(stdoutPipe, timeout: 5)
     stdinPipe.fileHandleForWriting.closeFile()
+    let outputReader = TestPipeReader(stdoutPipe)
+    _ = outputReader.wait()
+    let stderr = String(data: errorReader.wait(), encoding: .utf8) ?? ""
     process.waitUntilExit()
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
-
-    let stderr = await readPipe(stderrPipe)
     let data = try #require(line.data(using: .utf8))
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
 
@@ -328,16 +320,16 @@ private func runCLI(
     process.standardError = stderrPipe
 
     try process.run()
+    let errorReader = TestPipeReader(stderrPipe)
 
     let payload = #"{"type":"get_state","id":"state_1"}"# + "\n"
     try stdinPipe.fileHandleForWriting.write(contentsOf: Data(payload.utf8))
     let line = try readFirstLine(stdoutPipe, timeout: 10)
     stdinPipe.fileHandleForWriting.closeFile()
+    let outputReader = TestPipeReader(stdoutPipe)
+    _ = outputReader.wait()
+    let stderr = String(data: errorReader.wait(), encoding: .utf8) ?? ""
     process.waitUntilExit()
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
-
-    let stderr = await readPipe(stderrPipe)
     let data = try #require(line.data(using: .utf8))
     let object = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any]
 
@@ -388,6 +380,8 @@ private func runCLI(
     process.standardError = stderrPipe
 
     try process.run()
+    let outputReader = TestPipeReader(stdoutPipe)
+    let errorReader = TestPipeReader(stderrPipe)
 
     let command = "sleep 30 & echo $! > \(shellQuote(sleepPidPath)); wait $!"
     let payload = try JSONSerialization.data(withJSONObject: [
@@ -409,8 +403,8 @@ private func runCLI(
     kill(process.processIdentifier, SIGTERM)
     try waitForProcessExit(process, timeout: 5)
     stdinPipe.fileHandleForWriting.closeFile()
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
+    _ = outputReader.wait()
+    _ = errorReader.wait()
 
     #expect(process.terminationStatus == 143)
     #expect(waitForPidExit(sleepPid, timeout: 5))
@@ -447,16 +441,18 @@ private func assertRpcSignalExit(signal: Int32, expectedStatus: Int32) throws {
     process.standardError = stderrPipe
 
     try process.run()
+    let errorReader = TestPipeReader(stderrPipe)
     let payload = #"{"type":"get_state","id":"state_1"}"# + "\n"
     try stdinPipe.fileHandleForWriting.write(contentsOf: Data(payload.utf8))
     let line = try readFirstLine(stdoutPipe, timeout: 5)
     #expect(line.contains(#""id":"state_1""#))
+    let outputReader = TestPipeReader(stdoutPipe)
 
     kill(process.processIdentifier, signal)
     try waitForProcessExit(process, timeout: 5)
     stdinPipe.fileHandleForWriting.closeFile()
-    stdoutPipe.fileHandleForWriting.closeFile()
-    stderrPipe.fileHandleForWriting.closeFile()
+    _ = outputReader.wait()
+    _ = errorReader.wait()
 
     #expect(process.terminationStatus == expectedStatus)
 }
