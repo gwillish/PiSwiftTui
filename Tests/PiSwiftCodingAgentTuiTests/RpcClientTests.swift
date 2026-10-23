@@ -44,7 +44,8 @@ private func withTimeout<T: Sendable>(
     try await client.start()
 
     do {
-        _ = try await withTimeout(seconds: 2) {
+        // The child exits after 1 s; a short limit failed under parallel test load.
+        _ = try await withTimeout(seconds: 10) {
             try await client.getState()
         }
         Issue.record("Expected pending request to be rejected when child exits")

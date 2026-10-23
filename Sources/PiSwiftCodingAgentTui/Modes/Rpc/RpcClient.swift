@@ -785,8 +785,10 @@ public actor RpcClient {
         // Drain the stdout reader before applying the process-exit fallback. The reader's
         // `bytes.lines` sequence completes on the pipe's EOF once the child exits, so this
         // deterministically processes any final buffered lines — including a terminal
-        // `agent_settled` — instead of racing a fixed sleep.
+        // `agent_settled` — instead of racing a fixed sleep. Drain stderr too, so the exit
+        // error carries the child's last stderr lines.
         await stdoutTask?.value
+        await stderrTask?.value
         let error = exitError ?? makeProcessExitError(process)
         exitError = error
         rejectPendingRequests(error)
