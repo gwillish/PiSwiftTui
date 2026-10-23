@@ -17,8 +17,7 @@ private func selectorModel(_ id: String, provider: String = "test", reasoning: B
 
 @MainActor
 private func selectorText(_ component: any Component, width: Int = 120) -> String {
-    component.render(width: width).joined(separator: "\n")
-        .replacingOccurrences(of: "\u{001B}\\[[0-9;]*m", with: "", options: .regularExpression)
+    stripTerminalSequences(component.render(width: width).joined(separator: "\n"))
 }
 
 private final class SelectorTerminal: Terminal {

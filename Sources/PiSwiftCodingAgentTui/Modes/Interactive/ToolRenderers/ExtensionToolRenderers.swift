@@ -72,6 +72,7 @@ private func codemodeCall(_ call: [String: Any], theme: Theme, expanded: Bool) -
 @MainActor
 public func createCodemodeRenderers() -> ToolRenderers {
     ToolRenderers(renderCall: { args, theme, context in
+        startToolTimer(context)
         let title = theme.fg(.toolTitle, theme.bold("codemode"))
         let component = (context.lastComponent as? Container) ?? Container()
         component.clear()
@@ -93,6 +94,7 @@ public func createCodemodeRenderers() -> ToolRenderers {
         }
         return component
     }, renderResult: { result, options, theme, context in
+        let timerText = toolTimerText(context, isPartial: options.isPartial)
         let component = (context.lastComponent as? Container) ?? Container()
         component.clear()
         let details = toolDetails(result)
@@ -128,6 +130,10 @@ public func createCodemodeRenderers() -> ToolRenderers {
                     component.addChild(Text(theme.fg(.muted, "Full output: \(path)"), paddingX: 0, paddingY: 0))
                 }
             }
+        }
+        if let timerText {
+            component.addChild(Spacer(1))
+            component.addChild(Text(theme.fg(.muted, timerText), paddingX: 0, paddingY: 0))
         }
         return component
     })

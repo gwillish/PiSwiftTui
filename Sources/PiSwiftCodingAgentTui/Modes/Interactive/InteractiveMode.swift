@@ -274,6 +274,7 @@ public final class InteractiveMode {
     private var reportingManualCompaction = false
     private var altScreenRenderer: AltScreenRenderer?
     var clipboardCopy: (String) -> PiSwiftCodingAgent.ClipboardCopyResult = copyToClipboard
+    var sessionShareDependencies = SessionShareDependencies()
     var clipboardFiles: () throws -> [String]? = readClipboardFilePaths
     var clipboardImage: () -> ClipboardImageReadResult = readClipboardImagePngData
     var clipboardText: () -> ClipboardReadResult = readClipboardText
@@ -600,7 +601,7 @@ public final class InteractiveMode {
                 let items = levels.map { AutocompleteItem(value: $0.rawValue, label: $0.rawValue) }
                 return fuzzyFilter(items, query: query) { $0.value }
             }),
-            SlashCommand(name: "share", description: "Share session as a private gist"),
+            SlashCommand(name: "share", description: "Share session"),
             SlashCommand(name: "bug", description: "Export a local bug report", argumentHint: "[description]"),
             SlashCommand(name: "trust", description: "Manage project trust"),
             SlashCommand(name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling"),
@@ -1466,7 +1467,8 @@ public final class InteractiveMode {
             offsetY: options.offsetY,
             row: options.row.map(convertOverlaySize),
             col: options.col.map(convertOverlaySize),
-            margin: options.margin.map { OverlayMargin(top: $0.top, right: $0.right, bottom: $0.bottom, left: $0.left) }
+            margin: options.margin.map { OverlayMargin(top: $0.top, right: $0.right, bottom: $0.bottom, left: $0.left) },
+            nonCapturing: options.nonCapturing
         )
     }
 
@@ -3764,6 +3766,7 @@ public final class InteractiveMode {
             steeringMode: settingsManager.getSteeringMode(),
             followUpMode: settingsManager.getFollowUpMode(),
             transport: settingsManager.getTransport(),
+            sessionShareDestination: settingsManager.getSessionShareDestination(),
             cacheWarmingMode: settingsManager.getCacheWarmingMode(),
             thinkingLevel: ThinkingLevel(rawValue: settingsManager.getDefaultThinkingLevel() ?? "") ?? DEFAULT_THINKING_LEVEL,
             availableThinkingLevels: availableThinking,
@@ -3828,6 +3831,9 @@ public final class InteractiveMode {
                 onTransportChange: { transport in
                     settingsManager.setTransport(transport)
                     session.agent.transport = transport
+                },
+                onSessionShareDestinationChange: { destination in
+                    settingsManager.setSessionShareDestination(destination)
                 },
                 onCacheWarmingModeChange: { mode in
                     Task { @MainActor in await session.setCacheWarmingMode(mode) }
@@ -4839,7 +4845,8 @@ public final class InteractiveMode {
         guard let session, let tui, let editorContainer, let editor else { return }
         await shareSession(session: session, tui: tui, editorContainer: editorContainer, editor: editor,
                            showStatus: { [weak self] in self?.showStatus($0) },
-                           showError: { [weak self] in self?.showError($0) })
+                           showError: { [weak self] in self?.showError($0) },
+                           dependencies: sessionShareDependencies)
     }
 
     @MainActor

@@ -9,6 +9,10 @@ import Testing
 // pi-mono v0.99.1: render-utils.ts, tool-execution-component.test.ts,
 // codemode-renderer.test.ts, and extensions/mcp/tools.ts.
 @MainActor @Suite(.serialized) struct T3aRenderersTests {
+    init() {
+        setCapabilities(TerminalCapabilities(images: nil, trueColor: true, hyperlinks: false))
+    }
+
     @Test func genericArgumentsMatchJavascriptJSON() throws {
         let vectors: [(String, String)] = [
             ("1.0", "1"), ("-0", "0"), ("1e-7", "1e-7"), ("1e-6", "0.000001"),

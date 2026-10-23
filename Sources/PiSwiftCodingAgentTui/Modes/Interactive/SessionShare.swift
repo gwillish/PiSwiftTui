@@ -46,6 +46,27 @@ func shareSession(
     showError: @escaping (String) -> Void,
     dependencies: SessionShareDependencies = SessionShareDependencies()
 ) async {
+    do {
+        try await PiSwiftCodingAgent.shareSession(settingsManager: session.settingsManager) {
+            await shareSessionAsGist(session: session, tui: tui, editorContainer: editorContainer,
+                                     editor: editor, showStatus: showStatus, showError: showError,
+                                     dependencies: dependencies)
+        }
+    } catch {
+        showError(error.localizedDescription)
+    }
+}
+
+@MainActor
+private func shareSessionAsGist(
+    session: AgentSession,
+    tui: TUI,
+    editorContainer: Container,
+    editor: EditorComponentView,
+    showStatus: @escaping (String) -> Void,
+    showError: @escaping (String) -> Void,
+    dependencies: SessionShareDependencies
+) async {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent("pi-share-" + UUID().uuidString)
     do {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)

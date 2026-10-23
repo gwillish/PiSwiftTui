@@ -23,6 +23,7 @@ public struct SettingsConfig: Sendable {
     public var steeringMode: String
     public var followUpMode: String
     public var transport: Transport
+    public var sessionShareDestination: SessionShareDestination
     public var cacheWarmingMode: CacheWarmingMode
     public var thinkingLevel: ThinkingLevel
     public var availableThinkingLevels: [ThinkingLevel]
@@ -61,6 +62,7 @@ public struct SettingsConfig: Sendable {
         steeringMode: String,
         followUpMode: String,
         transport: Transport,
+        sessionShareDestination: SessionShareDestination = .auto,
         cacheWarmingMode: CacheWarmingMode = .off,
         thinkingLevel: ThinkingLevel,
         availableThinkingLevels: [ThinkingLevel],
@@ -97,6 +99,7 @@ public struct SettingsConfig: Sendable {
         self.steeringMode = steeringMode
         self.followUpMode = followUpMode
         self.transport = transport
+        self.sessionShareDestination = sessionShareDestination
         self.cacheWarmingMode = cacheWarmingMode
         self.thinkingLevel = thinkingLevel
         self.availableThinkingLevels = availableThinkingLevels
@@ -137,6 +140,7 @@ public struct SettingsCallbacks {
     public var onSteeringModeChange: (String) -> Void
     public var onFollowUpModeChange: (String) -> Void
     public var onTransportChange: (Transport) -> Void
+    public var onSessionShareDestinationChange: (SessionShareDestination) -> Void
     public var onCacheWarmingModeChange: (CacheWarmingMode) -> Void
     public var onThinkingLevelChange: (ThinkingLevel) -> Void
     public var onThemeChange: (String) -> Void
@@ -171,6 +175,7 @@ public struct SettingsCallbacks {
         onSteeringModeChange: @escaping (String) -> Void,
         onFollowUpModeChange: @escaping (String) -> Void,
         onTransportChange: @escaping (Transport) -> Void,
+        onSessionShareDestinationChange: @escaping (SessionShareDestination) -> Void = { _ in },
         onCacheWarmingModeChange: @escaping (CacheWarmingMode) -> Void = { _ in },
         onThinkingLevelChange: @escaping (ThinkingLevel) -> Void,
         onThemeChange: @escaping (String) -> Void,
@@ -203,6 +208,7 @@ public struct SettingsCallbacks {
         self.onSteeringModeChange = onSteeringModeChange
         self.onFollowUpModeChange = onFollowUpModeChange
         self.onTransportChange = onTransportChange
+        self.onSessionShareDestinationChange = onSessionShareDestinationChange
         self.onCacheWarmingModeChange = onCacheWarmingModeChange
         self.onThinkingLevelChange = onThinkingLevelChange
         self.onThemeChange = onThemeChange
@@ -273,6 +279,13 @@ public final class SettingsSelectorComponent: Container, MouseFocusOwner, System
                 description: "Preferred transport for providers that support multiple transports",
                 currentValue: config.transport.rawValue,
                 values: ["sse", "websocket", "auto"]
+            ),
+            SettingItem(
+                id: "share-destination",
+                label: "Session share destination",
+                description: "Upload sessions with /share to GitHub Gist",
+                currentValue: config.sessionShareDestination.rawValue,
+                values: ["auto", "gist"]
             ),
             SettingItem(
                 id: "cache-warming-mode",
@@ -495,6 +508,10 @@ public final class SettingsSelectorComponent: Container, MouseFocusOwner, System
                 case "transport":
                     if let transport = Transport(rawValue: newValue) {
                         callbacks.onTransportChange(transport)
+                    }
+                case "share-destination":
+                    if let destination = SessionShareDestination(rawValue: newValue) {
+                        callbacks.onSessionShareDestinationChange(destination)
                     }
                 case "cache-warming-mode":
                     if let mode = CacheWarmingMode(rawValue: newValue) {

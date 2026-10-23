@@ -7,6 +7,10 @@ import Testing
 @testable import PiSwiftCodingAgentTui
 
 @MainActor @Suite(.serialized) struct V110ComponentRendererTests {
+    init() {
+        setCapabilities(TerminalCapabilities(images: nil, trueColor: true, hyperlinks: false))
+    }
+
     private func textLines(_ component: Component) -> [String] {
         component.render(width: 60).map {
             toolTestPlain($0).replacingOccurrences(of: " +$", with: "", options: .regularExpression)
@@ -213,14 +217,14 @@ import Testing
         #expect(toolTestText(row).contains("duration=4200 pad=1"))
     }
 
-    @Test func partialShellErrorKeepsTookLabel() throws {
+    @Test func partialShellErrorKeepsElapsedLabel() throws {
         let renderers = createShellRenderers(prompt: "$")
         let state = ToolRenderState()
         let context = ToolRenderContext(state: state, executionStarted: true, isPartial: true, isError: true, durationMs: 4200)
         _ = try renderers.renderCall?([:], theme, context)
         let result = try #require(try renderers.renderResult?(AgentToolResult(content: [], details: nil), RenderResultOptions(expanded: false, isPartial: true), theme, context))
-        #expect(toolTestText(result).contains("Took"))
-        #expect(!toolTestText(result).contains("Elapsed"))
+        #expect(toolTestText(result).contains("Elapsed"))
+        #expect(!toolTestText(result).contains("Took"))
         #expect(!toolTestText(result).contains("4.2s"))
     }
 }

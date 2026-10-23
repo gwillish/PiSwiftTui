@@ -24,9 +24,7 @@ final class ToolTestTerminal: Terminal {
 }
 
 func toolTestPlain(_ text: String) -> String {
-    // Upstream v1.2.0 fake cursor markers are APC sequences (`ESC _ ... BEL`), as OSC sequences are stripped here.
-    text.replacingOccurrences(of: "\u{001B}[\\]_][^\u{0007}]*\u{0007}", with: "", options: .regularExpression)
-        .replacingOccurrences(of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+    stripTerminalSequences(text)
 }
 
 @MainActor func toolTestText(_ component: Component, width: Int = 120) -> String {
@@ -44,6 +42,10 @@ func toolTestResult(_ text: String, tool: String = "read", details: [String: Any
 }
 
 @MainActor @Suite(.serialized) struct ToolExecutionComponentTests {
+    init() {
+        setCapabilities(TerminalCapabilities(images: nil, trueColor: true, hyperlinks: false))
+    }
+
     private func component(_ name: String = "read", args: [String: AnyCodable] = [:], definition: CustomTool? = nil, renderers: ToolRenderers? = nil, cwd: String = FileManager.default.currentDirectoryPath) -> ToolExecutionComponent {
         ToolExecutionComponent(toolName: name, toolCallId: "test-call", args: args, customTool: definition, renderers: renderers, ui: TUI(terminal: ToolTestTerminal()), cwd: cwd)
     }

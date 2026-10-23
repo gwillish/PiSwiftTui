@@ -15,6 +15,7 @@ private final class TreeList: Component {
     private var selectedIndex = 0
     private var searchQuery = ""
     private var labels: [String: String?] = [:]
+    private var toolCalls: [String: ToolCall] = [:]
     private var currentLeafId: String?
     private var lastSelectedId: String?
     private var filterMode: FilterMode = .default
@@ -36,6 +37,14 @@ private final class TreeList: Component {
 
         for node in flatNodes {
             labels[node.node.entry.id] = node.node.label
+            if case .message(let entry) = node.node.entry,
+               case .assistant(let assistant) = entry.message {
+                for block in assistant.content {
+                    if case .toolCall(let call) = block {
+                        toolCalls[call.id] = call
+                    }
+                }
+            }
         }
 
         self.lastSelectedId = currentLeafId
@@ -66,7 +75,7 @@ private final class TreeList: Component {
             let indent = String(repeating: "  ", count: max(0, flat.indent))
             let label = labels[flat.node.entry.id] ?? flat.node.label
             let labelPrefix = label.map { theme.fg(.warning, "[\($0)] ") } ?? ""
-            let content = labelPrefix + describeEntry(flat.node.entry)
+            let content = labelPrefix + describeEntry(flat.node.entry, toolCalls: toolCalls)
             let line = prefix + theme.fg(.dim, indent) + content
             lines.append(truncateToWidth(isSelected ? theme.bold(line) : line, maxWidth: width, ellipsis: ""))
         }
@@ -142,7 +151,7 @@ private final class TreeList: Component {
             if trimmed.isEmpty {
                 return true
             }
-            return describeEntry(entry).lowercased().contains(trimmed.lowercased())
+            return describeEntry(entry, toolCalls: toolCalls).lowercased().contains(trimmed.lowercased())
         }
 
         if let lastSelectedId {
@@ -387,7 +396,7 @@ public final class TreeSelectorComponent: Container {
     }
 }
 
-private func describeEntry(_ entry: SessionEntry) -> String {
+private func describeEntry(_ entry: SessionEntry, toolCalls: [String: ToolCall]) -> String {
     switch entry {
     case .message(let messageEntry):
         switch messageEntry.message {
@@ -409,6 +418,10 @@ private func describeEntry(_ entry: SessionEntry) -> String {
             }
             return theme.fg(.success, "assistant: ") + normalizeMessageText(text)
         case .toolResult(let toolResult):
+            if let call = toolCalls[toolResult.toolCallId], call.name == "read" {
+                let range = formatReadLineRange(offset: call.arguments["offset"], limit: call.arguments["limit"])
+                return theme.fg(.muted, "[read: \(shortenPath(treeReadPath(call.arguments)))\(range)]")
+            }
             let name = toolResult.toolName
             return theme.fg(.muted, "[\(name)]")
         case .custom(let custom):
@@ -434,6 +447,44 @@ private func describeEntry(_ entry: SessionEntry) -> String {
         return theme.fg(.dim, "[label: \(entry.label ?? "(cleared)")] ")
     case .sessionInfo(let entry):
         return theme.fg(.dim, "[session name: \(entry.name ?? "(cleared)")]")
+    }
+}
+
+// Match String(args.path || args.file_path || "") in the upstream tree label.
+private func treeReadPath(_ args: [String: AnyCodable]) -> String {
+    let values = [args["path"], args["file_path"]].compactMap { $0 }.map { OrderedJSON.fromFoundation($0.value) }
+    return values.first(where: treePathIsTruthy).map(treePathString) ?? ""
+}
+
+private func treePathIsTruthy(_ value: OrderedJSON) -> Bool {
+    switch value {
+    case .null: return false
+    case .bool(let value): return value
+    case .string(let value): return !value.isEmpty
+    case .number(let source):
+        let number = Double(source) ?? .nan
+        return number != 0 && !number.isNaN
+    case .array, .object: return true
+    }
+}
+
+private func treePathString(_ value: OrderedJSON) -> String {
+    switch value {
+    case .null: return "null"
+    case .bool(let value): return value ? "true" : "false"
+    case .string(let value): return value
+    case .number(let source):
+        let number = Double(source) ?? .nan
+        if number.isNaN { return "NaN" }
+        if number == .infinity { return "Infinity" }
+        if number == -.infinity { return "-Infinity" }
+        return javascriptNumber(number)
+    case .array(let values):
+        return values.map { value in
+            if case .null = value { return "" }
+            return treePathString(value)
+        }.joined(separator: ",")
+    case .object: return "[object Object]"
     }
 }
 

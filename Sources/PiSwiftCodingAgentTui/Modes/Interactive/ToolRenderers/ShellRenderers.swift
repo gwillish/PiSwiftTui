@@ -4,25 +4,12 @@ import PiSwiftAI
 import PiSwiftAgent
 import PiSwiftCodingAgent
 
-@MainActor
-private final class ShellRenderState {
-    var startedAt: Date?
-    var endedAt: Date?
-    var timer: Task<Void, Never>?
-
-    deinit { timer?.cancel() }
-}
-
 /// Shell tools use the same renderer with a different prompt.
 @MainActor
 public func createShellRenderers(prompt: String) -> ToolRenderers {
     ToolRenderers(
         renderCall: { args, theme, context in
-            let state = shellState(context)
-            if context.executionStarted && state.startedAt == nil {
-                state.startedAt = Date()
-                state.endedAt = nil
-            }
+            startToolTimer(context)
             let command = str(args["command"])
             let display = command.map { $0.isEmpty ? theme.fg(.toolOutput, "...") : $0 }
                 ?? invalidArgText(theme)
@@ -35,22 +22,7 @@ public func createShellRenderers(prompt: String) -> ToolRenderers {
             return component
         },
         renderResult: { result, options, theme, context in
-            let state = shellState(context)
-            if state.startedAt != nil && options.isPartial && !context.isError && state.timer == nil {
-                let invalidate = context.invalidate
-                state.timer = Task { @MainActor in
-                    while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(1)) } catch { break }
-                        guard !Task.isCancelled else { break }
-                        invalidate()
-                    }
-                }
-            }
-            if !options.isPartial || context.isError {
-                if state.endedAt == nil { state.endedAt = Date() }
-                state.timer?.cancel()
-                state.timer = nil
-            }
+            let timerText = toolTimerText(context, isPartial: options.isPartial)
             let component = (context.lastComponent as? Container) ?? Container()
             component.clear()
             var output = getTextOutput(result, showImages: context.showImages)
@@ -89,13 +61,8 @@ public func createShellRenderers(prompt: String) -> ToolRenderers {
                 }
                 component.addChild(Text("\n" + theme.fg(.warning, "[\(warnings.joined(separator: ". "))]"), paddingX: 0, paddingY: 0))
             }
-            if !options.isPartial, let durationMs = context.durationMs {
-                let duration = formatShellDuration(Double(durationMs) / 1000)
-                component.addChild(Text("\n" + theme.fg(.muted, "Took \(duration)"), paddingX: 0, paddingY: 0))
-            } else if let startedAt = state.startedAt {
-                let duration = formatShellDuration((state.endedAt ?? Date()).timeIntervalSince(startedAt))
-                let label = options.isPartial && !context.isError ? "Elapsed" : "Took"
-                component.addChild(Text("\n" + theme.fg(.muted, "\(label) \(duration)"), paddingX: 0, paddingY: 0))
+            if let timerText {
+                component.addChild(Text("\n" + theme.fg(.muted, timerText), paddingX: 0, paddingY: 0))
             }
             component.invalidate()
             return component
@@ -104,18 +71,5 @@ public func createShellRenderers(prompt: String) -> ToolRenderers {
 }
 
 func formatShellDuration(_ seconds: TimeInterval) -> String {
-    if seconds < 60 { return String(format: "%.1fs", seconds) }
-    let whole = Int(seconds)
-    let minutes = whole / 60
-    let remainingSeconds = whole % 60
-    if minutes < 60 { return "\(minutes)m \(remainingSeconds)s" }
-    return "\(minutes / 60)h \(minutes % 60)m \(remainingSeconds)s"
-}
-
-@MainActor
-private func shellState(_ context: ToolRenderContext) -> ShellRenderState {
-    if let state = context.state.values["shell"] as? ShellRenderState { return state }
-    let state = ShellRenderState()
-    context.state.values["shell"] = state
-    return state
+    formatToolDuration(seconds)
 }

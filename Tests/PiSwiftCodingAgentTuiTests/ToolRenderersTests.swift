@@ -7,6 +7,10 @@ import Testing
 @testable import PiSwiftCodingAgentTui
 
 @MainActor @Suite(.serialized) struct ToolRenderersTests {
+    init() {
+        setCapabilities(TerminalCapabilities(images: nil, trueColor: true, hyperlinks: false))
+    }
+
     private func context(args: [String: AnyCodable] = [:], state: ToolRenderState = ToolRenderState(), cwd: String = "/tmp/pi-render-tests", expanded: Bool = false, error: Bool = false, complete: Bool = false, partial: Bool = false, started: Bool = false, last: Component? = nil, invalidate: @escaping () -> Void = {}) -> ToolRenderContext {
         ToolRenderContext(args: args, toolCallId: "renderer-test", invalidate: invalidate, lastComponent: last, state: state, cwd: cwd, executionStarted: started, argsComplete: complete, isPartial: partial, expanded: expanded, showImages: false, isError: error)
     }
@@ -217,8 +221,8 @@ import Testing
         _ = try call("bash", args, context: context(args: args, state: errorState, partial: true, started: true))
         _ = try result("bash", "", context: context(args: args, state: errorState, partial: true, started: true, invalidate: { errorInvalidations += 1 }))
         let errorResult = try result("bash", "failed", context: context(args: args, state: errorState, error: true, partial: true, started: true, invalidate: { errorInvalidations += 1 }))
-        #expect(toolTestText(errorResult).contains("Took"))
-        #expect(!toolTestText(errorResult).contains("Elapsed"))
+        #expect(toolTestText(errorResult).contains("Elapsed"))
+        #expect(!toolTestText(errorResult).contains("Took"))
         let settledCount = invalidations
         try await Task.sleep(for: .milliseconds(1100))
         #expect(invalidations == settledCount)
