@@ -88,7 +88,26 @@ func describeTask(_ node: TaskGraphNode) -> String {
     }
     let flags = [node.background ? "background" : "", node.abortRequested ? "aborting" : ""].filter { !$0.isEmpty }
     let owned = node.conversations.isEmpty ? "" : " owns conversation " + node.conversations.map { String($0.rawValue) }.joined(separator: ", ")
-    return "\(node.kind) #\(node.id.rawValue): \(status)" + (flags.isEmpty ? "" : " [\(flags.joined(separator: ", "))]") + owned
+    let parent = node.owner.map { " parent task #\($0.rawValue)" } ?? ""
+    return "\(node.kind) #\(node.id.rawValue): \(status)" + (flags.isEmpty ? "" : " [\(flags.joined(separator: ", "))]") + owned + parent
+}
+
+/// Keeps application data short without changing the saved entry.
+func shortData(_ data: JSONValue) -> String {
+    let text: String
+    do { text = try data.jsonText() }
+    catch { return "[Cannot render data: \(error)]" }
+    return String(text.prefix(240)) + (text.count > 240 ? "…" : "")
+}
+
+/// Shows every entry that does not have a built-in view.
+func applicationEntryText(kind: String, data: JSONValue?, model: [JSONValue]?) -> String {
+    var parts = ["<\(kind)>"]
+    if let data { parts.append(shortData(data)) }
+    for value in model ?? [] {
+        if case .user(let user) = durableMessage(value) { parts.append(userText(user.content)) }
+    }
+    return parts.joined(separator: " ")
 }
 
 func userText(_ content: UserContent) -> String {

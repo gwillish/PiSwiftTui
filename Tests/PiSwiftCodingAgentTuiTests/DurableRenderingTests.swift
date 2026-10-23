@@ -2,6 +2,7 @@ import Foundation
 import MiniTui
 import PiSwiftChord
 import PiSwiftDurable
+import PiSwiftDurableTesting
 import PiSwiftCodingAgent
 import PiSwiftCodingAgentDurable
 import Testing
@@ -55,6 +56,168 @@ private final class DurableRenderTerminal: Terminal {
     private func text(_ component: any Component) -> String {
         component.render(width: 100).joined(separator: "\n")
             .replacingOccurrences(of: "\u{001B}\\[[0-9;]*[A-Za-z]", with: "", options: .regularExpression)
+    }
+
+    @Test(arguments: ["pi.live", "pi.agent", "pi.inbox"])
+    func malformedPresentDocumentShowsError(_ kind: String) {
+        let tui = makeTui(); defer { tui.stop() }
+        let document: JSONObject
+        switch kind {
+        case "pi.live": document = ["nestedTools": "invalid"]
+        case "pi.agent": document = ["modelTools": 3]
+        default: document = ["items": "invalid"]
+        }
+        tui.apply(view(docs: [kind: document]))
+        #expect(text(tui.notices).contains("Cannot decode \(kind)"))
+        if kind == "pi.agent" { #expect(text(tui.footer).contains("Cannot read agent state")) }
+        tui.apply(view())
+        #expect(!text(tui.notices).contains("Cannot decode"))
+    }
+
+    @Test func applicationEntriesShowKindDataAndValidUserContent() throws {
+        let tui = makeTui(); defer { tui.stop() }
+        let input = EntryRecord(id: try EntryID(2), conversationId: rootConversationID, kind: "app.request",
+            model: [["role": "user", "content": "Custom user input", "timestamp": 1]], data: ["ticket": 42])
+        let display = EntryRecord(id: try EntryID(3), conversationId: rootConversationID, kind: "app.progress",
+            model: [["role": "invalid", "content": "Invalid model content"]], data: "Build complete")
+        let unknown = EntryRecord(id: try EntryID(4), conversationId: rootConversationID, kind: "pi.future")
+        tui.apply(view([input, display, unknown]))
+        let rendered = text(tui.chat)
+        for value in ["<app.request>", "ticket", "42", "Custom user input", "<app.progress>", "Build complete", "<pi.future>"] {
+            #expect(rendered.contains(value))
+        }
+        #expect(!rendered.contains("Invalid model content"))
+        #expect(shortData(.string(String(repeating: "x", count: 500))).count == 241)
+    }
+
+    @Test func displayOnlyWriteDoesNotEndStreamingOrStayQueued() throws {
+        let tui = makeTui(); defer { tui.stop() }
+        let live: JSONObject = ["run": ["taskId": 2, "inputs": []],
+            "generation": ["attempt": 1, "message": answer("Answer in progress")]]
+        tui.apply(view(docs: ["pi.live": live]))
+        let display = EntryRecord(id: try EntryID(3), conversationId: rootConversationID,
+            kind: "app.progress", data: ["step": "Saved file"])
+        tui.apply(view([display], docs: ["pi.live": live]))
+        let rendered = text(tui.chat)
+        #expect(rendered.contains("Saved file"))
+        #expect(rendered.components(separatedBy: "Answer in progress").count == 2)
+        #expect(text(tui.editor).contains("Working"))
+        #expect(text(tui.queue).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+    }
+
+    @Test func libraryCustomQueueAndImmediateWriteRenderWhileBusy() async throws {
+        let tui = makeTui(); defer { tui.stop() }
+        let setup = HarnessChatSetup()
+        let response = HarnessGatedResponse(message: chatAssistant("First answer"))
+        setup.models.setResponses([response.step, .message(chatAssistant("Follow-up answer"))])
+        let opened = try await openChat(setup: setup)
+        do {
+            _ = try await opened.root.submit(.input(content: .text("Start")), context: .background)
+            await response.reached.wait()
+            let queued = try await opened.root.submit(.input(content: .text("Queued custom input"),
+                entry: InputEntry(kind: "app.request", data: ["request": 42]), whenBusy: .followUp), context: .background)
+            let write = try await opened.root.submit(.write(entry: EntryDraft(kind: "app.progress", data: "Immediate display")), context: .background)
+            #expect(try await write.wait(context: .background).status == "done")
+            let inbox = try await opened.harness.snapshot(InboxDoc, conversationId: opened.root.id, context: .background)
+            let live = try await opened.harness.snapshot(LiveDoc, conversationId: opened.root.id, context: .background)
+            let docs: [String: JSONObject] = [
+                "pi.inbox": try #require(JSONValue(encoding: inbox).objectValue),
+                "pi.live": try #require(JSONValue(encoding: live).objectValue)
+            ]
+            tui.apply(view(try await allEntries(opened.root), docs: docs))
+            #expect(text(tui.chat).contains("Immediate display"))
+            #expect(text(tui.queue).contains("[followUp] <app.request> Queued custom input"))
+            #expect(!text(tui.queue).contains("app.progress"))
+            #expect(try #require(inbox).items.map(\.id) == [queued.id])
+            #expect(try #require(live).run != nil)
+            response.release()
+            _ = try await queued.wait(context: .background)
+            tui.apply(view(try await allEntries(opened.root)))
+            #expect(text(tui.chat).contains("<app.request>"))
+            #expect(text(tui.chat).contains("Queued custom input"))
+            #expect(text(tui.queue).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            try await opened.harness.close(context: .background)
+        } catch {
+            response.release()
+            try await opened.harness.close(context: .background)
+            throw error
+        }
+    }
+
+    @Test func queuedCustomInputsAndWritesShowEntries() {
+        let tui = makeTui(); defer { tui.stop() }
+        tui.apply(view(docs: ["pi.inbox": ["items": [
+            ["id": 2, "mode": "steer", "content": "Custom steering", "entry": ["kind": "app.input", "data": ["ticket": 8]]],
+            ["id": 3, "mode": "followUp", "content": [["type": "text", "text": "Custom follow-up"]], "entry": ["kind": "app.later"]],
+            ["id": 4, "mode": "write", "entry": ["kind": "app.note", "data": "Saved note",
+                "model": [["role": "user", "content": "Write content", "timestamp": 1]]]]
+        ]]]))
+        let rendered = text(tui.queue)
+        for value in ["[steer] <app.input> Custom steering", "ticket", "[followUp] <app.later> Custom follow-up",
+                      "[write] <app.note>", "Saved note", "Write content"] { #expect(rendered.contains(value)) }
+    }
+
+    @Test func retainedCompactionFailureRestoresAndSummaryClearsIt() throws {
+        let tui = makeTui(); defer { tui.stop() }
+        let failure = CompactionFailure(taskId: try TaskID(7), reason: .manual, error: "Summary request failed")
+        func docs(_ live: LiveState) throws -> [String: JSONObject] {
+            ["pi.live": try #require(JSONValue(encoding: live).objectValue)]
+        }
+        tui.apply(view(docs: try docs(LiveState(compactions: [.init(taskId: try TaskID(8), reason: .manual,
+            blocking: false, attempt: 1)], compactionFailure: failure))))
+        #expect(text(tui.editor).contains("Compacting"))
+        tui.apply(view(docs: try docs(LiveState(compactionFailure: failure))))
+        #expect(text(tui.notices).contains("Summary request failed"))
+        #expect(!text(tui.editor).contains("Compacting"))
+        let restored = makeTui(); defer { restored.stop() }
+        restored.apply(view(docs: try docs(LiveState(compactionFailure: failure))))
+        #expect(text(restored.notices).contains("task #7"))
+        let summary = try entry(9, "pi.compaction", ["role": "user", "content": "Saved summary", "timestamp": 1])
+        restored.apply(view([summary], docs: try docs(LiveState())))
+        #expect(!text(restored.notices).contains("Summary request failed"))
+        #expect(restored.summaries.count == 1)
+    }
+
+    @Test func terminalFailureKeepsFirstCauseAndShowsItOnce() {
+        let tui = makeTui(); defer { tui.stop() }
+        func failed(_ message: String) -> DurableView {
+            let value = view(notices: [.init(id: 1, level: .error, message: message)])
+            return DurableView(session: value.session, conversation: value.conversation,
+                conversations: value.conversations, models: value.models, notices: value.notices,
+                terminal: .failed(message: message))
+        }
+        tui.apply(failed("Storage commit failed"))
+        tui.apply(failed("Storage commit failed"))
+        #expect(text(tui.notices).components(separatedBy: "Storage commit failed").count == 2)
+        tui.apply(view())
+        #expect(text(tui.notices).contains("Session failed: Storage commit failed"))
+        #expect(tui.terminalState == .failed(message: "Storage commit failed"))
+    }
+
+    @Test func taskGraphShowsExplicitParentOwnership() throws {
+        let node: JSONValue = ["id": 3, "kind": "app.task", "conversationId": 1, "owner": 2,
+            "background": false, "abortRequested": true, "state": ["status": "running", "phase": "execute"], "conversations": []]
+        #expect(describeTask(try node.decode(TaskGraphNode.self)).contains("parent task #2"))
+    }
+
+    @Test func dockHeightUpdatesAfterTheFirstFrame() {
+        let tui = makeTui(); defer { tui.stop() }
+        func frame() -> String {
+            renderLayoutFrame(root: tui.layoutRoot, width: 100, height: 20, requestRender: {})
+                .lines.map(stripTerminalSequences).joined(separator: "\n")
+        }
+        tui.apply(view())
+        #expect(!frame().contains("Queued custom input"))
+        let updated = view(docs: [
+            "pi.inbox": ["items": [["id": 2, "mode": "followUp", "content": "Queued custom input"]]],
+            "pi.live": ["compactionFailure": ["taskId": 3, "reason": "manual", "error": "Summary failed"]]
+        ])
+        tui.apply(updated)
+        #expect(frame().contains("Queued custom input"))
+        #expect(frame().contains("Summary failed"))
+        tui.apply(DurableView(session: updated.session, conversation: updated.conversation,
+            conversations: updated.conversations, models: updated.models, terminal: .failed(message: "Storage failed")))
+        #expect(frame().contains("Session failed: Storage failed"))
     }
 
     @Test func transcriptShowsUserAndAssistant() throws {

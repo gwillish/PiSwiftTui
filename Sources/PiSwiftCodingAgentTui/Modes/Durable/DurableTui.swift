@@ -23,6 +23,7 @@ final class DurableTui {
     let renderer: AltScreenRenderer
     let layoutRoot = VStack()
     let chat = Container()
+    let nestedTools: DurableNestedTools
     let tasks = Container()
     let queue = Container()
     let notices = Container()
@@ -44,17 +45,20 @@ final class DurableTui {
     private var indicator: WorkingStatusIndicator?
     private var statusText = ""
     private var rebuilt = false
+    private(set) var terminalState: DurableSessionTerminal?
     let transcript: ScrollView
 
     init(cwd: String, handlers: DurableTuiHandlers, terminal: any Terminal = ProcessTerminal()) {
         self.cwd = cwd
         ui = TUI(terminal: terminal, showHardwareCursor: false, logDirectory: getAgentDir())
         renderer = ui.enableAltScreen()
+        nestedTools = DurableNestedTools(ui: ui, cwd: cwd)
         let keybindings = KeybindingsManager.create()
         editor = CustomEditor(ui: ui, theme: getEditorTheme(), keybindings: keybindings,
                               options: EditorOptions(paddingX: 1), embedWorkingStatus: true)
         let content = Container()
         content.addChild(chat)
+        content.addChild(nestedTools.container)
         content.addChild(Spacer(1))
         transcript = ScrollView(content, options: ScrollViewOptions(follow: .end, primary: true, overscroll: .chain))
         editor.onSubmit = handlers.submit
@@ -68,6 +72,7 @@ final class DurableTui {
             expanded.toggle()
             for card in cards { card.setExpanded(expanded) }
             for summary in summaries { summary.setExpanded(expanded) }
+            nestedTools.setExpanded(expanded)
             ui.requestRender()
         }
         editor.onAction(.followUp) { [weak self] in
@@ -94,6 +99,7 @@ final class DurableTui {
     func start() { ui.start() }
     func stop() {
         discardTools()
+        nestedTools.clear()
         indicator?.dispose()
         indicator = nil
         editor.setWorkingStatusIndicator(nil)
@@ -117,10 +123,64 @@ final class DurableTui {
     func restoreEditor() { mount(editor) }
 
     func apply(_ view: DurableView) {
-        let live = view.conversation.docs["pi.live"].flatMap { try? JSONValue.object($0).decode(LiveState.self) } ?? LiveState()
+        if terminalState == nil { terminalState = view.terminal }
+        notices.clear()
+        let live: LiveState?
+        do { live = try decodeLiveOf(view.conversation) }
+        catch {
+            live = nil
+            syncStatus(nil)
+            showError("Cannot decode pi.live: \(error)")
+        }
+        let agent: PiSwiftDurable.AgentState?
+        do { agent = try decodeAgentOf(view.conversation) }
+        catch {
+            agent = nil
+            showError("Cannot decode pi.agent: \(error)")
+        }
         syncTranscript(view.conversation.entries)
+        if let live { syncLive(live, entries: view.conversation.entries) }
+        syncTasks(view.tasks)
+        do {
+            let inbox = try view.conversation.docs["pi.inbox"].map { try JSONValue.object($0).decode(InboxState.self) } ?? InboxState()
+            syncQueue(inbox)
+        } catch {
+            queue.clear()
+            showError("Cannot decode pi.inbox: \(error)")
+        }
+        for item in view.notices.suffix(4) {
+            if case .failed(let message) = terminalState, item.message == message { continue }
+            let color: ThemeColor = item.level == .error ? .error : item.level == .warning ? .warning : .muted
+            notices.addChild(TruncatedText(theme.fg(color, item.message), paddingX: 1, paddingY: 0))
+        }
+        if case .failed(let message) = terminalState {
+            showError("Session failed: \(message)")
+        } else if terminalState == .closed {
+            notices.addChild(Text(theme.fg(.muted, "Session closed"), paddingX: 1, paddingY: 0))
+        }
+        if let agent {
+            let level = agent.thinkingLevel?.rawValue ?? "off"
+            editor.borderColor = { theme.getThinkingBorderColor(level)($0) }
+            syncFooter(view, agent: agent)
+        } else {
+            footerStats.setText(theme.fg(.error, "Cannot read agent state"))
+            footerHints.setText(view.session.cwd)
+        }
+        if terminalState != nil { syncStatus(nil) }
+        if rebuilt { transcript.scrollToEnd() }
+        // The dock height changes when queue items and notices arrive.
+        layoutRoot.invalidate()
+        ui.requestRender(force: rebuilt || terminalState != nil)
+        rebuilt = false
+    }
+
+    private func showError(_ message: String) {
+        notices.addChild(Text(theme.fg(.error, message), paddingX: 1, paddingY: 0))
+    }
+
+    private func syncLive(_ live: LiveState, entries: [EntryRecord]) {
         let message = durableAssistant(live.generation?.message)
-        if message == nil, streaming != nil { rebuild(view.conversation.entries) }
+        if message == nil, streaming != nil { rebuild(entries) }
         if let message { syncStreaming(message) }
         for slot in live.tools ?? [] where slot.status != .pending {
             let component = tool(slot.name, callId: slot.callId)
@@ -135,20 +195,11 @@ final class DurableTui {
                     details: slot.details.flatMap { try? AnyCodable(foundationJSON(from: $0)) }, isError: false), isPartial: true)
             }
         }
-        syncTasks(view.tasks)
-        syncQueue(view.conversation.docs["pi.inbox"].flatMap { try? JSONValue.object($0).decode(InboxState.self) } ?? InboxState())
-        notices.clear()
-        for item in view.notices.suffix(4) {
-            let color: ThemeColor = item.level == .error ? .error : item.level == .warning ? .warning : .muted
-            notices.addChild(TruncatedText(theme.fg(color, item.message), paddingX: 1, paddingY: 0))
+        nestedTools.apply(live, expanded: expanded)
+        if let failure = live.compactionFailure {
+            showError("Compaction failed (\(failure.reason.rawValue), task #\(failure.taskId.rawValue)): \(failure.error)")
         }
-        let level = agentOf(view.conversation).thinkingLevel?.rawValue ?? "off"
-        editor.borderColor = { theme.getThinkingBorderColor(level)($0) }
         syncStatus(live)
-        syncFooter(view)
-        if rebuilt { transcript.scrollToEnd() }
-        ui.requestRender(force: rebuilt)
-        rebuilt = false
     }
 
     private func syncTasks(_ graph: TaskGraph?) {
@@ -170,27 +221,33 @@ final class DurableTui {
     private func syncQueue(_ inbox: InboxState) {
         queue.clear()
         for item in inbox.items {
-            let text = item.mode == .write ? "<\(item.entry?.kind ?? "undefined")>" : userText(item.content)
+            let text: String
+            if let entry = item.entry {
+                text = applicationEntryText(kind: entry.kind, data: entry.data, model: entry.model)
+            } else if let entry = item.inputEntry {
+                text = "<\(entry.kind)> \(userText(item.content))" + (entry.data.map { " · \(shortData($0))" } ?? "")
+            } else { text = userText(item.content) }
             queue.addChild(TruncatedText(theme.fg(.muted, "[\(item.mode.rawValue)] \(text)"), paddingX: 1, paddingY: 0))
         }
     }
-    private func syncStatus(_ live: LiveState) {
+    private func syncStatus(_ live: LiveState?) {
         var text = ""
-        if let retry = live.generation?.retry {
-            text = "Retrying (attempt \((live.generation?.attempt ?? 0) + 1)): \(retry.error)"
-        } else if live.generation?.deferred != nil { text = "Waiting for deferred response..." }
-        else if let compaction = live.compactions?.first {
-            text = compaction.retry != nil ? "Retrying \(compaction.reason.rawValue) compaction (attempt \(compaction.attempt + 1))..." : "Compacting (\(compaction.reason.rawValue))..."
-        } else if let tool = live.tools?.first(where: { $0.status == .running }) { text = "Running \(tool.name)... (esc to abort)" }
-        else if live.run != nil { text = "Working... (esc to abort)" }
+        if let live {
+            if let retry = live.generation?.retry {
+                text = "Retrying (attempt \((live.generation?.attempt ?? 0) + 1)): \(retry.error)"
+            } else if live.generation?.deferred != nil { text = "Waiting for deferred response..." }
+            else if let compaction = live.compactions?.first {
+                text = compaction.retry != nil ? "Retrying \(compaction.reason.rawValue) compaction (attempt \(compaction.attempt + 1))..." : "Compacting (\(compaction.reason.rawValue))..."
+            } else if let tool = live.tools?.first(where: { $0.status == .running }) { text = "Running \(tool.name)... (esc to abort)" }
+            else if live.run != nil { text = "Working... (esc to abort)" }
+        }
         guard text != statusText else { return }
         statusText = text
         indicator?.dispose()
         indicator = text.isEmpty ? nil : WorkingStatusIndicator(ui: ui, message: text, colorFn: { [weak self] in self?.editor.borderColor($0) ?? $0 })
         editor.setWorkingStatusIndicator(indicator)
     }
-    private func syncFooter(_ view: DurableView) {
-        let agent = agentOf(view.conversation)
+    private func syncFooter(_ view: DurableView, agent: PiSwiftDurable.AgentState) {
         let usage = totalUsage(view.conversation.docs["pi.usage"].flatMap { try? JSONValue.object($0).decode(UsageState.self) } ?? UsageState())
         var stats: [String] = []
         if usage.input != 0 { stats.append("↑\(formatTokens(usage.input))") }
@@ -264,7 +321,10 @@ final class DurableTui {
         case ("pi.reset", _):
             chat.addChild(Spacer(1))
             chat.addChild(Text(theme.fg(.muted, "[new context]"), paddingX: 1, paddingY: 0))
-        default: break
+        default:
+            chat.addChild(Spacer(1))
+            chat.addChild(Text(theme.fg(.customMessageText,
+                applicationEntryText(kind: entry.kind, data: entry.data, model: entry.model)), paddingX: 1, paddingY: 0))
         }
     }
     private func syncStreaming(_ message: AssistantMessage) {

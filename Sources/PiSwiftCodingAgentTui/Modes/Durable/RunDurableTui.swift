@@ -13,31 +13,62 @@ final class DurableTuiSession {
     private(set) var tui: DurableTui!
     private(set) var active = true
     private var subscription: DurableViewSubscription?
+    private var inputOpen = true
+    private let exit: () -> Void
 
     init(source: any DurableViewSource, controller: any DurableController,
          terminal: any Terminal = ProcessTerminal(), exit: @escaping () -> Void) {
         self.source = source
         self.controller = controller
+        self.exit = exit
         tui = DurableTui(cwd: source.current().session.cwd, handlers: DurableTuiHandlers(
             submit: { [weak self] in self?.submit($0) },
-            followUp: { [controller] text in Task { await controller.submit(text, whenBusy: .followUp) } },
-            abort: { [controller] in Task { await controller.abort() } },
+            followUp: { [weak self] text in self?.perform { await $0.submit(text, whenBusy: .followUp) } },
+            abort: { [weak self] in self?.perform { await $0.abort() } },
             exit: exit,
             selectModel: { [weak self] in self?.selectModel() },
-            cycleThinking: { [controller] in Task { await controller.cycleThinking() } }), terminal: terminal)
+            cycleThinking: { [weak self] in self?.perform { await $0.cycleThinking() } }), terminal: terminal)
     }
 
     func subscribe() {
-        subscription = source.subscribe { [weak self] in
-            // Listeners run on the view source's serial queue.
-            Task { @MainActor [weak self] in
-                guard let self, active else { return }
-                tui.apply(source.current())
-            }
+        subscription = source.subscribe { [weak self, source] in
+            // Read on the serial listener queue, then transfer UI work to the main actor.
+            let view = source.current()
+            Task { @MainActor [weak self] in self?.apply(view) }
         }
     }
+    func apply(_ view: DurableView) {
+        guard active, inputOpen else { return }
+        if view.terminal != nil { inputOpen = false }
+        tui.apply(view)
+        if !inputOpen { exit() }
+    }
+
+    func terminalClosed() {
+        guard active, inputOpen else { return }
+        inputOpen = false
+        tui.apply(source.current())
+        exit()
+    }
+
+    private var acceptsInput: Bool {
+        guard active, inputOpen else { return false }
+        let view = source.current()
+        if view.terminal != nil { apply(view); return false }
+        return true
+    }
+
+    private func perform(_ action: @escaping @MainActor (any DurableController) async -> Void) {
+        guard acceptsInput else { return }
+        Task { @MainActor [weak self] in
+            guard let self, acceptsInput else { return }
+            await action(controller)
+        }
+    }
+
     func unsubscribe() {
         active = false
+        inputOpen = false
         subscription?.cancel()
         subscription = nil
     }
@@ -46,21 +77,25 @@ final class DurableTuiSession {
         tui.stop()
     }
     private func submit(_ text: String) {
+        guard acceptsInput else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         if trimmed == "/model" { selectModel(); return }
-        if trimmed == "/tasks" { Task { await controller.toggleTasks() }; return }
+        if trimmed == "/tasks" { perform { await $0.toggleTasks() }; return }
         if trimmed == "/agents" { selectConversation(); return }
         if trimmed == "/compact" || trimmed.hasPrefix("/compact ") {
             let instructions = String(trimmed.dropFirst("/compact".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            Task { await controller.compact(instructions: instructions.isEmpty ? nil : instructions) }
+            perform { await $0.compact(instructions: instructions.isEmpty ? nil : instructions) }
             return
         }
-        Task { await controller.submit(trimmed, whenBusy: .steer) }
+        perform { await $0.submit(trimmed, whenBusy: .steer) }
     }
     private func selectModel() {
+        guard acceptsInput else { return }
         let snapshot = source.current()
-        let current = agentOf(snapshot.conversation).model
+        let current: ModelRef?
+        do { current = try decodeAgentOf(snapshot.conversation).model }
+        catch { tui.apply(snapshot); return }
         func isCurrent(_ model: ModelSummary) -> Bool {
             model.provider == current?.provider && model.modelId == current?.modelId
         }
@@ -71,25 +106,46 @@ final class DurableTuiSession {
         let selector = ListSelector(title: "Select model:", items: models.map {
             SelectItem(value: "\($0.provider)/\($0.modelId)", label: $0.modelId, description: $0.provider)
         }, onSelect: { [weak self] value in
-            guard let self, let separator = value.firstIndex(of: "/") else { return }
+            guard let self, acceptsInput, let separator = value.firstIndex(of: "/") else { return }
             tui.restoreEditor()
             let model = ModelRef(provider: String(value[..<separator]), modelId: String(value[value.index(after: separator)...]))
-            Task { await self.controller.setModel(model) }
-        }, onCancel: { [weak self] in self?.tui.restoreEditor() })
+            perform { await $0.setModel(model) }
+        }, onCancel: { [weak self] in
+            guard let self, acceptsInput else { return }
+            tui.restoreEditor()
+        })
         tui.mount(selector)
     }
     private func selectConversation() {
+        guard acceptsInput else { return }
         let snapshot = source.current()
         let selector = ListSelector(title: "Switch to:", items: snapshot.conversations.reversed().map {
             SelectItem(value: String($0.id.rawValue), label: $0.label,
                 description: ($0.id == snapshot.conversation.conversation.id ? "(shown) " : "") + ($0.title ?? ""))
         }, onSelect: { [weak self] value in
-            guard let self, let number = Int64(value), let id = try? ConversationID(number) else { return }
+            guard let self, acceptsInput, let number = Int64(value), let id = try? ConversationID(number) else { return }
             tui.restoreEditor()
-            Task { await self.controller.switchConversation(id) }
-        }, onCancel: { [weak self] in self?.tui.restoreEditor() })
+            perform { await $0.switchConversation(id) }
+        }, onCancel: { [weak self] in
+            guard let self, acceptsInput else { return }
+            tui.restoreEditor()
+        })
         tui.mount(selector)
     }
+}
+
+/// Runs the durable interface and waits for storage, environment, and lock cleanup.
+@MainActor
+public func runDurableTui(_ durable: OpenDurableResult) async -> SessionCloseResult {
+    await runDurableTui(durable, terminal: ProcessTerminal())
+}
+
+@MainActor
+func runDurableTui(_ durable: OpenDurableResult, terminal: any Terminal) async -> SessionCloseResult {
+    await runDurableTui(view: durable.view, controller: durable.controller,
+        settings: durable.settings, terminal: terminal, closed: { await durable.closed })
+    await durable.close()
+    return await durable.closed
 }
 
 /// Runs the durable interface until the user exits or the caller cancels.
@@ -101,7 +157,8 @@ public func runDurableTui(view source: any DurableViewSource, controller: any Du
 
 @MainActor
 func runDurableTui(view source: any DurableViewSource, controller: any DurableController,
-                   settings: SettingsManager, terminal: any Terminal) async {
+                   settings: SettingsManager, terminal: any Terminal,
+                   closed: (@Sendable () async -> SessionCloseResult)? = nil) async {
     applyInteractiveTerminalCapabilities(settings)
     initTheme()
     let (exited, exit) = AsyncStream<Void>.makeStream()
@@ -110,11 +167,20 @@ func runDurableTui(view source: any DurableViewSource, controller: any DurableCo
         showError: { message in FileHandle.standardError.write(Data((message + "\n").utf8)) },
         onChanged: { session.tui.ui.requestRender() })
     session.subscribe()
+    let observer = closed.map { closed in
+        Task { @MainActor in
+            _ = await closed()
+            guard !Task.isCancelled else { return }
+            session.terminalClosed()
+        }
+    }
     session.tui.start()
     themes.applyFromSettings()
-    session.tui.apply(source.current())
+    session.apply(source.current())
     var iterator = exited.makeAsyncIterator()
     _ = await iterator.next()
+    await session.tui.ui.waitForRender()
+    observer?.cancel()
     session.unsubscribe()
     themes.dispose()
     session.stop()

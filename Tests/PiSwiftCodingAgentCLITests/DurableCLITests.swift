@@ -1,9 +1,26 @@
 import ArgumentParser
+import Foundation
+import PiSwiftDurable
 @testable import PiSwiftCodingAgentCLI
 import Testing
 
 @Suite("Durable CLI")
 struct DurableCLITests {
+    @Test func normalCloseHasSuccessfulStatus() throws {
+        try DurableSubcommand.checkTerminalResult(.closed)
+    }
+
+    @Test func failedSessionHasNonzeroStatus() {
+        struct BackendFailure: Error, LocalizedError {
+            var errorDescription: String? { "First backend cause" }
+        }
+        var reports: [String] = []
+        #expect(throws: ExitCode.failure) {
+            try DurableSubcommand.checkTerminalResult(.failed(BackendFailure()), report: { reports.append($0) })
+        }
+        #expect(reports == ["First backend cause"])
+    }
+
     @Test func startsNewSessionByDefault() throws {
         let command = try #require(PiCodingAgentCLI.parseAsRoot(["durable"]) as? DurableSubcommand)
         #expect(!command.continueSession)
