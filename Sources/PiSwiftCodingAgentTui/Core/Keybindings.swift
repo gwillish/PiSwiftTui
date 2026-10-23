@@ -104,18 +104,40 @@ public final class KeybindingsManager {
         }
 
         var result: KeybindingsConfig = [:]
-        for (action, value) in dict {
-            if let key = value as? String {
+        for (action, value) in dict where action != "$schema" {
+            if let key = value as? String, isValidFileKey(key) {
                 result[action] = [key]
-            } else if let array = value as? [Any] {
-                let keys = array.compactMap { $0 as? String }
-                if !keys.isEmpty {
-                    result[action] = keys
-                }
+            } else if let keys = value as? [String], keys.allSatisfy(isValidFileKey) {
+                result[action] = keys
             }
         }
         return result
     }
+
+    private static func isValidFileKey(_ keyId: KeyId) -> Bool {
+        var key = keyId[...]
+        var modifiers: Set<String> = []
+        let names = ["ctrl", "shift", "alt", "super", "cmd", "meta"]
+        while let name = names.first(where: { key.hasPrefix($0 + "+") }) {
+            // Swift accepts cmd and meta as names for the Super modifier.
+            let modifier = (name == "cmd" || name == "meta") ? "super" : name
+            guard modifiers.insert(modifier).inserted else { return false }
+            key = key.dropFirst(name.count + 1)
+        }
+
+        if key.utf8.count == 1, let byte = key.utf8.first {
+            return (97...122).contains(byte) || (48...57).contains(byte)
+                || "`-=[]\\;',./!@#$%^&*()_+|~{}:<>?".contains(key)
+        }
+        return fileBaseKeys.contains(String(key))
+    }
+
+    private static let fileBaseKeys: Set<String> = [
+        "escape", "esc", "enter", "return", "tab", "space", "backspace",
+        "delete", "insert", "clear", "home", "end", "pageUp", "pageDown",
+        "up", "down", "left", "right",
+        "f1", "f2", "f3", "f4", "f5", "f6", "f7", "f8", "f9", "f10", "f11", "f12",
+    ]
 
     private static func buildMaps(config: KeybindingsConfig) -> [AppAction: [KeyId]] {
         var map = DEFAULT_APP_KEYBINDINGS

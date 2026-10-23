@@ -222,7 +222,11 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
         var scopedModels: [ScopedModel] = []
         let modelPatterns = parsed.models ?? settingsManager.getEnabledModels()
         if let patterns = modelPatterns, !patterns.isEmpty {
-            scopedModels = await resolveModelScope(patterns, modelRegistry)
+            let scope = await resolveModelScopeWithDiagnostics(patterns, modelRegistry)
+            scopedModels = scope.scopedModels
+            for warning in modelScopeWarningLines(scope.diagnostics) {
+                fputs(warning + "\n", stderr)
+            }
             time("resolveModelScope")
         }
 
@@ -433,7 +437,7 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
                 sessionManager: sessionManager,
                 modelRegistry: modelRegistry,
                 model: agent?.state.model,
-                isIdle: { !(session?.isStreaming ?? true) },
+                isIdle: { session?.isIdle ?? false },
                 hasPendingMessages: { (session?.pendingMessageCount ?? 0) > 0 },
                 abort: { Task { await session?.abort() } },
                 events: eventBus,
@@ -693,13 +697,16 @@ struct PiCodingAgentCLI: AsyncParsableCommand {
                 initialImages: initialMessageResult.images
             )
         } else {
-            try await runPrintMode(
+            let status = try await runPrintMode(
                 createdSession,
                 appMode == .json ? .json : .text,
                 parsed.messages,
                 initialMessageResult.message,
                 initialMessageResult.images
             )
+            if status != 0 {
+                throw ExitCode(Int32(status))
+            }
         }
     }
 
@@ -1083,6 +1090,26 @@ func createSessionManager(_ parsed: Args, cwd: String, resumeSession: String?) t
     return SessionManager.create(cwd, nil, sessionId: parsed.sessionId)
 }
 
+func modelScopeWarningLines(_ diagnostics: [ModelScopeDiagnostic]) -> [String] {
+    diagnostics.map { "Warning: \($0.message)" }
+}
+
+func resolveStartupCliModel(_ parsed: Args, _ registry: ModelRegistry) async -> ResolveCliModelResult {
+    var resolved = resolveCliModel(
+        cliProvider: parsed.provider,
+        cliModel: parsed.model,
+        cliThinking: parsed.thinking,
+        inlineApiKey: parsed.apiKey != nil,
+        modelRegistry: registry
+    )
+    if let model = resolved.model,
+       !(await registry.isAvailable(model, inlineApiKey: parsed.apiKey != nil)) {
+        resolved.error = "Model \(model.provider)/\(model.id) is not available for the configured account."
+        resolved.model = nil
+    }
+    return resolved
+}
+
 private struct InitialModelSelection {
     var model: Model?
     var scopedModel: ScopedModel?
@@ -1107,11 +1134,7 @@ private func findInitialModelForSession(
     }
 
     if parsed.model != nil {
-        let resolved = resolveCliModel(
-            cliProvider: parsed.provider,
-            cliModel: parsed.model,
-            modelRegistry: modelRegistry
-        )
+        let resolved = await resolveStartupCliModel(parsed, modelRegistry)
         if let warning = resolved.warning {
             fputs("Warning: \(warning)\n", stderr)
         }
@@ -1120,10 +1143,6 @@ private func findInitialModelForSession(
             Darwin.exit(1)
         }
         if let model = resolved.model {
-            if !(await modelRegistry.isAvailable(model)) {
-                fputs("Model \(model.provider)/\(model.id) is not available for the configured account.\n", stderr)
-                Darwin.exit(1)
-            }
             return InitialModelSelection(model: model, scopedModel: nil, cliThinkingLevel: resolved.thinkingLevel)
         }
         let display = parsed.provider != nil ? "\(parsed.provider!)/\(parsed.model ?? "")" : (parsed.model ?? "")

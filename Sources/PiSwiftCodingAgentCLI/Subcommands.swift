@@ -379,6 +379,42 @@ func runCredentialPrint(
     registry: ModelRegistry,
     authStorage: AuthStorage
 ) async -> CLICommandResult {
+    if cliProvider?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
+        guard let model = cliModel?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty else {
+            return .failure("Specify --provider <provider> or --model <model>.")
+        }
+        let models = resolveCredentialPrintModels(
+            model,
+            providers: authStorage.listCredentials().map(\.providerId),
+            availableModels: registry.getAll()
+        )
+        guard !models.isEmpty else {
+            return .failure("Model \"\(model)\" not found. Use --list-models to see available models.")
+        }
+
+        var credentials: [(provider: String, value: String)] = []
+        for model in models {
+            let result = await credentialPrintForProvider(
+                kind: kind,
+                provider: model.provider,
+                minimumOAuthValidityMs: minimumOAuthValidityMs,
+                authStorage: authStorage
+            )
+            if result.exitCode == 0, let credential = result.stdout {
+                credentials.append((model.provider, credential))
+            }
+        }
+        if credentials.count == 1 {
+            return .success(credentials[0].value)
+        }
+        if credentials.isEmpty {
+            let type = kind == .apiKey ? "API key" : "OAuth bearer token"
+            return .failure("No usable \(type) is configured")
+        }
+        let providers = credentials.map(\.provider).joined(separator: ", ")
+        return .failure("Multiple configured providers matched (\(providers)). Specify --provider.")
+    }
+
     switch resolveAuthProvider(provider: cliProvider, model: cliModel, registry: registry) {
     case .failure(let message):
         return .failure(message)
@@ -386,36 +422,49 @@ func runCredentialPrint(
         guard knownProvider(provider, registry: registry) else {
             return .failure("Unknown provider \"\(provider)\". Use --list-models to see available providers.")
         }
+        return await credentialPrintForProvider(
+            kind: kind,
+            provider: provider,
+            minimumOAuthValidityMs: minimumOAuthValidityMs,
+            authStorage: authStorage
+        )
+    }
+}
 
-        switch kind {
-        case .apiKey:
-            if case .oauth? = authStorage.get(provider) {
-                return .failure("Provider \"\(provider)\" is configured with OAuth, not an API key.")
-            }
-            guard let credential = await authStorage.getApiKey(provider),
-                  !credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return .failure("No usable API key is configured for \(provider).")
-            }
-            return .success(credential)
-
-        case .bearerToken:
-            guard case .oauth? = authStorage.get(provider) else {
-                return .failure("Provider \"\(provider)\" is not configured with an OAuth bearer token.")
-            }
-            let requiredValidity = max(defaultOAuthMinimumValidityMs, minimumOAuthValidityMs)
-            guard await authStorage.getApiKey(
-                provider,
-                minimumOAuthValidityMs: requiredValidity
-            ) != nil,
-            case .oauth(let refreshed) = authStorage.get(provider),
-            oauthMeetsMinimumValidity(refreshed, minimumValidityMs: requiredValidity),
-            !refreshed.access.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return .failure(
-                    "OAuth credential for \(provider) could not be refreshed to meet the minimum validity requirement."
-                )
-            }
-            return .success(refreshed.access)
+private func credentialPrintForProvider(
+    kind: CredentialPrintKind,
+    provider: String,
+    minimumOAuthValidityMs: Double,
+    authStorage: AuthStorage
+) async -> CLICommandResult {
+    switch kind {
+    case .apiKey:
+        if case .oauth? = authStorage.get(provider) {
+            return .failure("Provider \"\(provider)\" is configured with OAuth, not an API key.")
         }
+        guard let credential = await authStorage.getApiKey(provider),
+              !credential.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure("No usable API key is configured for \(provider).")
+        }
+        return .success(credential)
+
+    case .bearerToken:
+        guard case .oauth? = authStorage.get(provider) else {
+            return .failure("Provider \"\(provider)\" is not configured with an OAuth bearer token.")
+        }
+        let requiredValidity = max(defaultOAuthMinimumValidityMs, minimumOAuthValidityMs)
+        guard await authStorage.getApiKey(
+            provider,
+            minimumOAuthValidityMs: requiredValidity
+        ) != nil,
+        case .oauth(let refreshed) = authStorage.get(provider),
+        oauthMeetsMinimumValidity(refreshed, minimumValidityMs: requiredValidity),
+        !refreshed.access.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .failure(
+                "OAuth credential for \(provider) could not be refreshed to meet the minimum validity requirement."
+            )
+        }
+        return .success(refreshed.access)
     }
 }
 
@@ -479,6 +528,8 @@ private func resolveAuthProvider(
     let resolved = resolveCliModel(
         cliProvider: provider,
         cliModel: model,
+        cliThinking: nil,
+        inlineApiKey: false,
         modelRegistry: registry
     )
     if let error = resolved.error {

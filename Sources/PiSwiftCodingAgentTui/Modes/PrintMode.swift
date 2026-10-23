@@ -5,16 +5,49 @@ import PiSwiftAgent
 import MiniTui
 import PiSwiftCodingAgent
 
+struct PrintModeOutput: Sendable {
+    let writeString: @Sendable (String) -> Void
+    let writeError: @Sendable (String) -> Void
+    let flush: @Sendable () -> Void
+
+    func writeJSONLine(_ object: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: object) else { return }
+        writeString(String(decoding: data, as: UTF8.self) + "\n")
+    }
+
+    static func standard() -> PrintModeOutput {
+        let output = takeOverStdoutForMachineReadableOutput()
+        return PrintModeOutput(
+            writeString: { output.writeString($0) },
+            writeError: { fputs($0, stderr) },
+            flush: { fflush(stdout) }
+        )
+    }
+}
+
+@discardableResult
 public func runPrintMode(
     _ session: AgentSession,
     _ mode: Mode,
     _ messages: [String],
     _ initialMessage: String? = nil,
     _ initialImages: [ImageContent]? = nil
-) async throws {
+) async throws -> Int {
+    try await runPrintMode(session, mode, messages, initialMessage, initialImages, output: nil)
+}
+
+@discardableResult
+func runPrintMode(
+    _ session: AgentSession,
+    _ mode: Mode,
+    _ messages: [String],
+    _ initialMessage: String? = nil,
+    _ initialImages: [ImageContent]? = nil,
+    output: PrintModeOutput?
+) async throws -> Int {
     await installDefaultToolHtmlRenderer(session)
     let outputJson = mode == .json
-    let machineOutput = takeOverStdoutForMachineReadableOutput()
+    let machineOutput = output ?? .standard()
 
     if outputJson, let header = session.sessionManager.getHeader() {
         machineOutput.writeJSONLine(encodeSessionHeader(header))
@@ -58,7 +91,7 @@ public func runPrintMode(
                 session?.setActiveToolsByName(toolNames)
             },
             isIdle: { [weak session] in
-                !(session?.isStreaming ?? true)
+                session?.isIdle ?? false
             },
             waitForIdle: { [weak session] in
                 await session?.waitForIdle()
@@ -77,7 +110,7 @@ public func runPrintMode(
         )
 
         _ = hookRunner.onError { error in
-            fputs("Hook error (\(error.hookPath)): \(error.error)\n", stderr)
+            machineOutput.writeError("Hook error (\(error.hookPath)): \(error.error)\n")
         }
 
         _ = await hookRunner.emit(SessionStartEvent())
@@ -100,8 +133,9 @@ public func runPrintMode(
         if case .assistant(let assistant) = lastMessage {
             if assistant.stopReason == .error || assistant.stopReason == .aborted {
                 let message = assistant.errorMessage ?? "Request \(assistant.stopReason.rawValue)"
-                fputs("\(message)\n", stderr)
-                Darwin.exit(1)
+                machineOutput.writeError("\(message)\n")
+                machineOutput.flush()
+                return 1
             }
             let textBlocks = assistant.content.compactMap { block -> String? in
                 if case .text(let text) = block { return text.text }
@@ -124,14 +158,16 @@ public func runPrintMode(
             if let notice = latestCacheMissNotice(session) {
                 machineOutput.writeString(notice + "\n")
             }
+            if assistant.stopReason == .length {
+                machineOutput.flush()
+                machineOutput.writeError("Response was truncated: the model reached its output token limit.\n")
+                return 1
+            }
         }
     }
 
-    flushStdout()
-}
-
-private func flushStdout() {
-    fflush(stdout)
+    machineOutput.flush()
+    return 0
 }
 
 private func latestCacheMissNotice(_ session: AgentSession) -> String? {

@@ -117,7 +117,7 @@ Options for add:
 
 Other options:
   --json                  Print the list as JSON
-  --timeout <seconds>     How long login waits for the browser (default: 300)
+  --timeout <seconds>     Time limit for the whole sign-in (default: 300)
 """
 
 private let mcpHelpHint = "Use \"\(APP_NAME) mcp --help\" for usage."
@@ -415,7 +415,7 @@ private func printMcpList(_ report: McpListReport, json: Bool, options: McpComma
             let tools = server.tools.map { tool in server.toolExposure?[tool].map { "\(tool) [\($0.rawValue)]" } ?? tool }
             options.log("  tools: \(tools.joined(separator: ", "))")
         }
-        if let resources = server.resources { options.log("  resources: \(resources), URI templates: \(server.resourceTemplates ?? 0)") }
+        if server.hasResources { options.log("  offers resources") }
         if let error = server.error { options.log("  " + error.replacingOccurrences(of: "\n", with: "\n  ")) }
     }
     for error in report.errors { options.log("config error: " + error) }

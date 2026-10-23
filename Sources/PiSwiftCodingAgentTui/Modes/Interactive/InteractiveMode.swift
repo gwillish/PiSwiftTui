@@ -1157,7 +1157,7 @@ public final class InteractiveMode {
                 return await self.handleHookNavigateTree(targetId, options: options)
             },
             isIdle: { [weak session] in
-                !(session?.isStreaming ?? true)
+                session?.isIdle ?? false
             },
             waitForIdle: { [weak session] in
                 await session?.waitForIdle()
